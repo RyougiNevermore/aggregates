@@ -24,6 +24,9 @@ type CommandBus interface {
 	Subscribe(name string, handler CommandHandler)
 	Unsubscribe(name string)
 	dispatch(msg CommandMessage, fn func(id string, err error)) (err error)
+	Start(ctx context.Context) (err error)
+	Shutdown(ctx context.Context, fn func(err error))
+	ShutdownAndWait(ctx context.Context) (err error)
 }
 
 type CommandGateway interface {

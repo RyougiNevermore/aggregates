@@ -1,6 +1,8 @@
 package aggregates
 
-import "context"
+import (
+	"context"
+)
 
 type Command interface {
 	TargetAggregateIdentifier() (id string)
@@ -17,20 +19,21 @@ type CommandMessage interface {
 }
 
 type CommandHandler interface {
-	Handle(ctx context.Context, msg CommandMessage) (id string, err error)
+	Handle(ctx context.Context, msg CommandMessage, fn func(ctx context.Context, id string, err error))
 }
 
 type CommandBus interface {
 	Subscribe(name string, handler CommandHandler)
 	Unsubscribe(name string)
-	dispatch(msg CommandMessage, fn func(id string, err error)) (err error)
+	send(ctx context.Context, msg CommandMessage, fn func(ctx context.Context, id string, err error))
+	dispatch(ctx context.Context, msg CommandMessage, fn func(ctx context.Context, id string, err error))
 	Start(ctx context.Context) (err error)
 	Shutdown(ctx context.Context, fn func(err error))
 	ShutdownAndWait(ctx context.Context) (err error)
 }
 
 type CommandGateway interface {
-	Send(ctx context.Context, cmd Command, fn func(id string, err error))
+	Send(ctx context.Context, cmd Command, fn func(ctx context.Context, id string, err error))
 	SendAndWait(ctx context.Context, cmd Command) (id string, err error)
 }
 

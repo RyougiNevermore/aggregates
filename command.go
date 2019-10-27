@@ -6,7 +6,6 @@ import (
 
 type Command interface {
 	TargetAggregateIdentifier() (id string)
-	Name() (name string)
 }
 
 type CommandMessage interface {

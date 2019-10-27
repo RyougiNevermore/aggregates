@@ -10,7 +10,7 @@ import (
 func NewSimpleCommandBus(buffer int) CommandBus {
 	return &simpleCommandBus{
 		running:  false,
-		reqChan:  make(chan *commandRequest, buffer),
+		buffer:   buffer,
 		count:    new(sync.WaitGroup),
 		lock:     new(sync.Mutex),
 		handlers: new(sync.Map),
@@ -24,6 +24,7 @@ func NewSimpleCommandBus(buffer int) CommandBus {
 
 type simpleCommandBus struct {
 	running  bool
+	buffer   int
 	reqChan  chan *commandRequest
 	count    *sync.WaitGroup
 	lock     *sync.Mutex
@@ -82,7 +83,7 @@ func (bus *simpleCommandBus) send(ctx context.Context, msg CommandMessage, fn fu
 func (bus *simpleCommandBus) dispatch(ctx context.Context, msg CommandMessage, fn func(ctx context.Context, id string, err error)) {
 	handler0, has := bus.handlers.Load(msg.CommandName())
 	if !has {
-		fn(ctx,"", fmt.Errorf("can not found command handler via command name %s", msg.CommandName()))
+		fn(ctx, "", fmt.Errorf("can not found command handler via command name %s", msg.CommandName()))
 		return
 	}
 	handler, isHandler := handler0.(CommandHandler)
@@ -101,9 +102,10 @@ func (bus *simpleCommandBus) Start(ctx context.Context) (err error) {
 		return errors.New("command bus is running")
 	}
 	wg := new(sync.WaitGroup)
+	bus.reqChan = make(chan *commandRequest, bus.buffer)
 	go func(ctx context.Context, bus *simpleCommandBus, wg *sync.WaitGroup) {
 		for {
-			req, ok := <- bus.reqChan
+			req, ok := <-bus.reqChan
 			if !ok {
 				break
 			}
@@ -127,6 +129,7 @@ func (bus *simpleCommandBus) Shutdown(ctx context.Context, fn func(err error)) {
 	go func(ctx context.Context, bus *simpleCommandBus, fn func(err error)) {
 		bus.count.Wait()
 		bus.running = false
+		bus.reqChan = nil
 		fn(nil)
 	}(ctx, bus, fn)
 }
@@ -140,6 +143,7 @@ func (bus *simpleCommandBus) ShutdownAndWait(ctx context.Context) (err error) {
 	close(bus.reqChan)
 	bus.count.Wait()
 	bus.running = false
+	bus.reqChan = nil
 	return
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 type simpleCommandMessage struct {
@@ -69,8 +70,7 @@ type unitOfWorker struct {
 
 func NewSimpleCommandBus(buffer int, workers int) CommandBus {
 	return &simpleCommandBus{
-		running:              false,
-		runMutex:             new(sync.Mutex),
+		running:              0,
 		runWg:                new(sync.WaitGroup),
 		buffer:               buffer,
 		workers:              int64(workers),
@@ -84,8 +84,7 @@ func NewSimpleCommandBus(buffer int, workers int) CommandBus {
 }
 
 type simpleCommandBus struct {
-	running             bool
-	runMutex            *sync.Mutex
+	running             int64
 	runWg               *sync.WaitGroup
 	buffer              int
 	workers             int64
@@ -97,6 +96,18 @@ type simpleCommandBus struct {
 	commandWorkerMapping *sync.Map
 
 	handleMap *sync.Map
+}
+
+func (bus *simpleCommandBus) isRunning() bool {
+	return atomic.LoadInt64(&bus.running) == 1
+}
+
+func (bus *simpleCommandBus) setRunning() {
+	atomic.CompareAndSwapInt64(&bus.running, 0, 1)
+}
+
+func (bus *simpleCommandBus) setUnRunning() {
+	atomic.CompareAndSwapInt64(&bus.running, 1, 0)
 }
 
 func (bus *simpleCommandBus) sendToWorker(msg *simpleCommandMessage) {
@@ -136,9 +147,7 @@ func (bus *simpleCommandBus) getHandle(name string) (handle CommandHandle) {
 }
 
 func (bus *simpleCommandBus) Subscribe(name string, handle CommandHandle) {
-	bus.runMutex.Lock()
-	defer bus.runMutex.Unlock()
-	if bus.running {
+	if bus.isRunning() {
 		panic(fmt.Errorf("command bus can not subscribe the %s command handle, %w", name, CommandBusIsRunningErr))
 	}
 	if name == "" {
@@ -151,9 +160,7 @@ func (bus *simpleCommandBus) Subscribe(name string, handle CommandHandle) {
 }
 
 func (bus *simpleCommandBus) Unsubscribe(name string) {
-	bus.runMutex.Lock()
-	defer bus.runMutex.Unlock()
-	if bus.running {
+	if bus.isRunning() {
 		panic(fmt.Errorf("command bus can not unsubscribe the %s command handle, %w", name, CommandBusIsRunningErr))
 	}
 	if name == "" {
@@ -163,9 +170,7 @@ func (bus *simpleCommandBus) Unsubscribe(name string) {
 }
 
 func (bus *simpleCommandBus) Send(ctx *Context, name string, command Command) (id string, err error) {
-	//bus.runMutex.Lock()
-	//defer bus.runMutex.Unlock()
-	if !bus.running {
+	if !bus.isRunning() {
 		panic(fmt.Errorf("can not send command into the command bus, %w", CommandBusIsNotRunningErr))
 	}
 	if name == "" {
@@ -196,12 +201,10 @@ func (bus *simpleCommandBus) dispatch(ctx *Context, name string, command Command
 }
 
 func (bus *simpleCommandBus) Start(ctx context.Context) {
-	bus.runMutex.Lock()
-	defer bus.runMutex.Unlock()
-	if bus.running {
+	if bus.isRunning() {
 		panic(fmt.Errorf("startup the command bus failed, %w", CommandBusIsRunningErr))
 	}
-	bus.running = true
+	bus.setRunning()
 	bus.createQueue()
 	bus.runWg.Add(1)
 	go func(bus *simpleCommandBus) {
@@ -256,12 +259,10 @@ func (bus *simpleCommandBus) createQueue() {
 }
 
 func (bus *simpleCommandBus) ShutdownAndWait(ctx context.Context) {
-	bus.runMutex.Lock()
-	defer bus.runMutex.Unlock()
-	if !bus.running {
+	if !bus.isRunning() {
 		panic(fmt.Errorf("shutdown the command bus failed, %w", CommandBusIsNotRunningErr))
 	}
-	bus.running = false
+	bus.setUnRunning()
 	close(bus.commandMasterQueue)
 	bus.runWg.Wait()
 	return

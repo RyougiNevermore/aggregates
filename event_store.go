@@ -24,9 +24,9 @@ type StoredEvent interface {
 type EventStore interface {
 	Create(ctx context.Context, aggregateId string, aggregateName string) (err error)
 	AppendEvents(ctx context.Context, events []StoredEvent) (lastEventId string, err error)
-	ReadEvents(ctx context.Context, aggregateId string) (events []StoredEvent, err error)
+	ReadEvents(ctx context.Context, aggregateId string, lastEventId string) (events []StoredEvent, err error)
 	MakeSnapshot(ctx context.Context, aggregate Aggregate, lastEventId string) (err error)
-	LoadSnapshot(ctx context.Context, aggregateId string, aggregate Aggregate) (err error)
+	LoadSnapshot(ctx context.Context, aggregateId string, aggregate Aggregate) (lastEventId string, err error)
 }
 
 func asMsgPackStoredEvent(aggregateName string, eventName string, event DomainEvent, occur time.Time) *msgPackStoredEvent {

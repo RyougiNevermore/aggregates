@@ -8,7 +8,7 @@ import (
 )
 
 func NewMetaData() *MetaData {
-	return &MetaData{value:make(map[string]interface{})}
+	return &MetaData{value: make(map[string]interface{})}
 }
 
 type MetaData struct {
@@ -29,8 +29,8 @@ func (m *MetaData) GetString(key string) (data string, has bool) {
 	isStr := false
 	if data, isStr = v.(string); isStr {
 		return
- 	} else {
- 		data = fmt.Sprint(v)
+	} else {
+		data = fmt.Sprint(v)
 	}
 	return
 }
@@ -112,7 +112,3 @@ func (m *MetaData) Range(fn func(key string, data interface{})) {
 	}
 	return
 }
-
-
-
-

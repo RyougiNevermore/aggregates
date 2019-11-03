@@ -16,8 +16,7 @@ type DomainEventRaw interface {
 
 type Aggregate interface {
 	Identifier() (id string)
-	IncrVersion() (version int64)
-	onEvents(name string, event DomainEvent)
+	OnEvent(name string, event DomainEventRaw)
 }
 
 var aid = nuid.New()

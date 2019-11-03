@@ -7,10 +7,10 @@ import (
 
 type DomainEvent interface {
 	AggregateIdentifier() string
-	Occur() time.Time
 }
 
 type DomainEventRaw interface {
+	EventName() string
 	Decode(e DomainEvent) (err error)
 }
 
@@ -27,3 +27,8 @@ func NewAggregateId() (id string) {
 	return
 }
 
+type aggregateEvent struct {
+	name    string
+	payload DomainEvent
+	occur   time.Time
+}

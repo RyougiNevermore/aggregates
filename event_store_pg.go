@@ -63,6 +63,25 @@ CREATE INDEX "AGGREGATES_IDX_SNAPSHOTS"
 
 */
 
+/* GET EVENT LIST FROM LAST ID(NOT INCLUDE)
+
+
+SELECT "E1"."EVENTS"
+	FROM (
+		SELECT jsonb_array_elements("EVENTS") AS "EVENTS"
+		FROM "DOC"."AGGREGATES" WHERE "ID" = '1'
+	) AS "E1" OFFSET 0 LIMIT (
+		SELECT ("ROW_NO"-1)  FROM (
+			SELECT row_number() over() as "ROW_NO", *
+			FROM (
+				SELECT jsonb_array_elements("EVENTS") AS "EVENTS" FROM "DOC"."AGGREGATES" WHERE "ID" = '1' LIMIT 1000
+			) AS "E0"
+		) AS "E" WHERE "E"."EVENTS" @> '{"id":"1"}'
+	)
+
+
+ */
+
 type pgStoredEvent struct {
 	Id    string    `json:"id"`
 	Name  string    `json:"name"`

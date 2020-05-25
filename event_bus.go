@@ -2,6 +2,9 @@ package aggregates
 
 import "time"
 
+// TODO
+// USING GO/EVENTBUS'S INTERFACE AND EVENTS
+
 type EventMessage interface {
 	EventName() string
 	AggregateName() string

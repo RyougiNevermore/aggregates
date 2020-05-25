@@ -12,6 +12,8 @@ var (
 	ErrNoStoredSnapshotOfAggregate = errors.New("no stored snapshot of aggregate")
 )
 
+// TODO USING MYSQL
+
 type StoredEvent interface {
 	DomainEventRaw
 	AggregateName() string

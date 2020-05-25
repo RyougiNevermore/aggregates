@@ -1,26 +1,25 @@
 package aggregates
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 )
 
-func NewMetaData() *MetaData {
-	return &MetaData{value: make(map[string]interface{})}
+func newMetadata() *metadata {
+	return &metadata{value: make(map[string]interface{})}
 }
 
-type MetaData struct {
+type metadata struct {
 	value map[string]interface{}
 }
 
-func (m *MetaData) Get(key string) (data interface{}, has bool) {
+func (m *metadata) Get(key string) (data interface{}, has bool) {
 	data, has = m.value[key]
 	return
 }
 
-func (m *MetaData) GetString(key string) (data string, has bool) {
+func (m *metadata) GetString(key string) (data string, has bool) {
 	var v interface{}
 	v, has = m.value[key]
 	if !has {
@@ -35,7 +34,7 @@ func (m *MetaData) GetString(key string) (data string, has bool) {
 	return
 }
 
-func (m *MetaData) GetInt(key string) (data int, has bool, err error) {
+func (m *metadata) GetInt(key string) (data int, has bool, err error) {
 	var v interface{}
 	v, has = m.value[key]
 	if !has {
@@ -50,7 +49,7 @@ func (m *MetaData) GetInt(key string) (data int, has bool, err error) {
 	return
 }
 
-func (m *MetaData) GetFloat64(key string) (data float64, has bool, err error) {
+func (m *metadata) GetFloat64(key string) (data float64, has bool, err error) {
 	var v interface{}
 	v, has = m.value[key]
 	if !has {
@@ -65,7 +64,7 @@ func (m *MetaData) GetFloat64(key string) (data float64, has bool, err error) {
 	return
 }
 
-func (m *MetaData) GetTime(key string) (data time.Time, has bool, err error) {
+func (m *metadata) GetTime(key string) (data time.Time, has bool, err error) {
 	var v interface{}
 	v, has = m.value[key]
 	if !has {
@@ -80,7 +79,7 @@ func (m *MetaData) GetTime(key string) (data time.Time, has bool, err error) {
 	return
 }
 
-func (m *MetaData) ToInterfaceViaJson() (v interface{}, err error) {
+func (m *metadata) ToInterfaceViaJson() (v interface{}, err error) {
 	p, merr := json.Marshal(m.value)
 	if merr != nil {
 		err = errors.New("can not marshal metadata to json")
@@ -93,7 +92,7 @@ func (m *MetaData) ToInterfaceViaJson() (v interface{}, err error) {
 	return
 }
 
-func (m *MetaData) DataSet() (data []interface{}) {
+func (m *metadata) DataSet() (data []interface{}) {
 	data = make([]interface{}, len(m.value))
 	for _, v := range m.value {
 		data = append(data, v)
@@ -101,12 +100,12 @@ func (m *MetaData) DataSet() (data []interface{}) {
 	return
 }
 
-func (m *MetaData) Size() (size int) {
+func (m *metadata) Size() (size int) {
 	size = len(m.value)
 	return
 }
 
-func (m *MetaData) Range(fn func(key string, data interface{})) {
+func (m *metadata) Range(fn func(key string, data interface{})) {
 	for k, v := range m.value {
 		fn(k, v)
 	}

@@ -2,268 +2,301 @@ package aggregates
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"github.com/google/uuid"
+	"runtime"
+	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
-type simpleCommandMessage struct {
-	ctx        *Context
-	name       string
-	command    Command
-	resultChan chan *simpleCommandResult
+var (
+	CommandBusNoHandleError    = errors.New("aggregates send command bus failed, handle is not found")
+	CommandBusInterruptedError = errors.New("aggregates send command bus failed, command bus is interrupted")
+)
+
+type Command interface {
+	TargetAggregateIdentifier() (id string)
 }
 
-var simpleCommandMessagePool = &sync.Pool{
-	New: func() interface{} {
-		return &simpleCommandMessage{}
-	},
+type CommandHandle func(ctx *Context, command Command) (v interface{}, err error)
+
+type CommandResult struct {
+	id          string
+	v           interface{}
+	err         error
+	interrupted bool
 }
 
-func asSimpleCommandMessage(ctx *Context, name string, command Command, resultChan chan *simpleCommandResult) *simpleCommandMessage {
-	msg0 := simpleCommandMessagePool.Get()
-	msg, _ := msg0.(*simpleCommandMessage)
-	msg.ctx = ctx
-	msg.command = command
+func (r *CommandResult) Id() string {
+	return r.id
+}
+
+func (r *CommandResult) Value() interface{} {
+	return r.v
+}
+
+func (r *CommandResult) Error() error {
+	return r.err
+}
+
+func (r *CommandResult) Succeed() bool {
+	return r.err == nil && !r.interrupted
+}
+
+func (r *CommandResult) Failed() bool {
+	return r.err != nil || r.interrupted
+}
+
+// 中断：bus停止了，不再消费command了
+func (r *CommandResult) Interrupted() bool {
+	return r.interrupted
+}
+
+type CommandBus interface {
+	Subscribe(name string, handle CommandHandle)
+	Unsubscribe(name string)
+	Send(name string, command Command) (id string, err error)
+	SendAndWait(name string, command Command) (result *CommandResult)
+	Start(ctx context.Context)
+	ShutdownAndWait(ctx context.Context)
+}
+
+type commandMessage struct {
+	id      string
+	name    string
+	command Command
+	async   bool
+	result  chan *CommandResult
+}
+
+var commandMessagePool = sync.Pool{New: func() interface{} {
+	return &commandMessage{}
+}}
+
+func commandMessageAcquire(id string, name string, command Command, async bool, result chan *CommandResult) *commandMessage {
+	msg := commandMessagePool.Get().(*commandMessage)
+	msg.id = id
 	msg.name = name
-	msg.resultChan = resultChan
+	msg.command = command
+	msg.async = async
+	if async {
+		msg.result = result
+	}
 	return msg
 }
 
-func releaseSimpleCommandMessage(msg *simpleCommandMessage) {
-	msg.ctx = nil
-	msg.name = ""
-	msg.command = nil
-	msg.resultChan = nil
-	simpleCommandMessagePool.Put(msg)
-}
-
-type simpleCommandResult struct {
-	id  string
-	err error
-}
-
-var simpleCommandResultPool = &sync.Pool{
-	New: func() interface{} {
-		return &simpleCommandResult{}
-	},
-}
-
-func asSimpleCommandResult(id string, err error) *simpleCommandResult {
-	result0 := simpleCommandResultPool.Get()
-	result, _ := result0.(*simpleCommandResult)
-	result.id = id
-	result.err = err
-	return result
-}
-
-func releaseSimpleCommandResult(result *simpleCommandResult) {
-	result.id = ""
-	result.err = nil
-	simpleCommandResultPool.Put(result)
-}
-
-type unitOfWorker struct {
-	count    int
-	workerNo int64
-}
-
-func NewSimpleCommandBus(buffer int, workers int) CommandBus {
-	return &simpleCommandBus{
-		running:              0,
-		runWg:                new(sync.WaitGroup),
-		buffer:               buffer,
-		workers:              int64(workers),
-		commandMasterQueue:   nil,
-		commandWorkerQueues:  make([]chan *simpleCommandMessage, workers),
-		commandWorkerIndex:   0,
-		commandWorkerMask:    int64(workers - 1),
-		commandWorkerMapping: new(sync.Map),
-		handleMap:            new(sync.Map),
+func commandMessageRelease(msg *commandMessage) {
+	if msg.async {
+		close(msg.result)
 	}
+	commandMessagePool.Put(msg)
+}
+
+func NewSimpleCommandBus(workers int, buffer int) (bus CommandBus) {
+
+	if workers < 1 {
+		workers = runtime.NumCPU()
+	}
+	if buffer < 1 {
+		buffer = 1024
+	}
+
+	bus = &simpleCommandBus{
+		running: NewAtomicSwitch(),
+		workers: workers,
+		handles: &sync.Map{},
+		wg:      &sync.WaitGroup{},
+		ch:      make(chan *commandMessage, buffer),
+	}
+
+	return
 }
 
 type simpleCommandBus struct {
-	running             int64
-	runWg               *sync.WaitGroup
-	buffer              int
-	workers             int64
-	commandMasterQueue  chan *simpleCommandMessage
-	commandWorkerQueues []chan *simpleCommandMessage
-
-	commandWorkerIndex   int64
-	commandWorkerMask    int64
-	commandWorkerMapping *sync.Map
-
-	handleMap *sync.Map
+	running             *AtomicSwitch
+	workers             int
+	handles             *sync.Map
+	wg                  *sync.WaitGroup
+	ch                  chan *commandMessage
+	cancelFn            context.CancelFunc
+	resultsCache        *cacheTTL
+	resultsCacheItemTTL time.Duration
 }
 
-func (bus *simpleCommandBus) isRunning() bool {
-	return atomic.LoadInt64(&bus.running) == 1
+func (s *simpleCommandBus) Subscribe(name string, handle CommandHandle) {
+	if s.running.IsOn() {
+		panic(errors.New("command bus subscribe handle failed, it is running"))
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		panic(errors.New("command bus subscribe handle failed, name is empty"))
+	}
+	if handle == nil {
+		panic(errors.New("command bus subscribe handle failed, handle is nil"))
+	}
+	_, has := s.handles.Load(name)
+	if has {
+		panic(errors.New("command bus subscribe handle failed, handle existed"))
+	}
+	s.handles.Store(name, handle)
 }
 
-func (bus *simpleCommandBus) setRunning() {
-	atomic.CompareAndSwapInt64(&bus.running, 0, 1)
+func (s *simpleCommandBus) Unsubscribe(name string) {
+	if s.running.IsOn() {
+		panic(errors.New("command bus unsubscribe handle failed, it is running"))
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		panic(errors.New("command bus unsubscribe handle failed, name is empty"))
+	}
+	s.handles.Delete(name)
 }
 
-func (bus *simpleCommandBus) setUnRunning() {
-	atomic.CompareAndSwapInt64(&bus.running, 1, 0)
-}
-
-func (bus *simpleCommandBus) sendToWorker(msg *simpleCommandMessage) {
-	workerKey := msg.command.TargetAggregateIdentifier()
-	var unit *unitOfWorker
-	unit0, has := bus.commandWorkerMapping.Load(workerKey)
-	workNo := int64(0)
+func (s *simpleCommandBus) getHandle(name string) (handle CommandHandle, has bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		panic(errors.New("command bus get handle failed, name is empty"))
+	}
+	var h0 interface{}
+	h0, has = s.handles.Load(name)
 	if !has {
-		workNo = bus.commandWorkerIndex & bus.commandWorkerMask
-		unit = &unitOfWorker{count: 0, workerNo: workNo}
-		bus.commandWorkerMapping.Store(workerKey, unit)
-		bus.commandWorkerIndex++
-	} else {
-		unit, _ = unit0.(*unitOfWorker)
-		workNo = unit.workerNo
+		return
 	}
-	bus.commandWorkerQueues[workNo] <- msg
-	unit.count++
-}
 
-func (bus *simpleCommandBus) releaseFromWorker(msg *simpleCommandMessage) {
-	workerKey := msg.command.TargetAggregateIdentifier()
-	if unit0, has := bus.commandWorkerMapping.Load(workerKey); has {
-		unit, _ := unit0.(*unitOfWorker)
-		unit.count--
-		if unit.count == 0 {
-			bus.commandWorkerMapping.Delete(workerKey)
-		}
-	}
-}
+	handle, has = h0.(CommandHandle)
 
-func (bus *simpleCommandBus) getHandle(name string) (handle CommandHandle) {
-	if handle0, has := bus.handleMap.Load(name); has {
-		handle, _ = (handle0).(CommandHandle)
-	}
 	return
 }
 
-func (bus *simpleCommandBus) Subscribe(name string, handle CommandHandle) {
-	if bus.isRunning() {
-		panic(fmt.Errorf("command bus can not subscribe the %s command handle, %w", name, CommandBusIsRunningErr))
-	}
+func (s *simpleCommandBus) Send(name string, command Command) (id string, err error) {
+	name = strings.TrimSpace(name)
 	if name == "" {
-		panic(fmt.Errorf("command bus can not subscribe the empty name command handle"))
-	}
-	if handle == nil {
-		panic(fmt.Errorf("command bus can not subscribe the %s command handle, cause handle is nil", name))
-	}
-	bus.handleMap.Store(name, handle)
-}
-
-func (bus *simpleCommandBus) Unsubscribe(name string) {
-	if bus.isRunning() {
-		panic(fmt.Errorf("command bus can not unsubscribe the %s command handle, %w", name, CommandBusIsRunningErr))
-	}
-	if name == "" {
-		panic(fmt.Errorf("command bus can not unsubscribe the empty name command handle"))
-	}
-	bus.handleMap.Delete(name)
-}
-
-func (bus *simpleCommandBus) Send(ctx *Context, name string, command Command) (id string, err error) {
-	if !bus.isRunning() {
-		panic(fmt.Errorf("can not send command into the command bus, %w", CommandBusIsNotRunningErr))
-	}
-	if name == "" {
-		err = SendNoNameCommandErr
-		return
+		panic(errors.New("command bus send command failed, name is empty"))
 	}
 	if command == nil {
-		err = SendEmptyCommandErr
+		panic(errors.New("command bus send command failed, command is nil"))
+	}
+	id = uuid.New().String()
+	msg := commandMessageAcquire(id, name, command, false, nil)
+	if s.running.IsOff() {
+		commandMessageRelease(msg)
+		err = errors.New("command bus send command failed, it is not running")
 		return
 	}
-	resultChan := make(chan *simpleCommandResult, 1)
-	bus.commandMasterQueue <- asSimpleCommandMessage(ctx, name, command, resultChan)
-	bus.runWg.Add(1)
-	result := <-resultChan
-	id, err = result.id, result.err
-	releaseSimpleCommandResult(result)
-	result = nil
+	s.ch <- msg
 	return
 }
 
-func (bus *simpleCommandBus) dispatch(ctx *Context, name string, command Command) (id string, err error) {
-	handle := bus.getHandle(name)
-	if handle == nil {
-		panic(fmt.Errorf("comand bus dispatch command failed, cause the %s handle is nil", name))
+func (s *simpleCommandBus) SendAndWait(name string, command Command) (result *CommandResult) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		panic(errors.New("command bus send command failed, name is empty"))
 	}
-	id, err = handle(ctx, command)
-	return
-}
-
-func (bus *simpleCommandBus) Start(ctx context.Context) {
-	if bus.isRunning() {
-		panic(fmt.Errorf("startup the command bus failed, %w", CommandBusIsRunningErr))
+	if command == nil {
+		panic(errors.New("command bus send command failed, command is nil"))
 	}
-	bus.setRunning()
-	bus.createQueue()
-	bus.runWg.Add(1)
-	go func(bus *simpleCommandBus) {
-		for i := int64(0); i < bus.workers; i++ {
-			bus.runWg.Add(1)
-			go func(workerNo int64, bus *simpleCommandBus) {
-				bus.runWg.Done()
-				worker := bus.commandWorkerQueues[workerNo]
-				for {
-					msg, ok := <-worker
-					if !ok {
-						break
-					}
-					id, err := bus.dispatch(msg.ctx, msg.name, msg.command)
-
-					msg.resultChan <- asSimpleCommandResult(id, err)
-					close(msg.resultChan)
-
-					bus.releaseFromWorker(msg)
-					releaseSimpleCommandMessage(msg)
-
-					bus.runWg.Done()
-				}
-				bus.commandWorkerQueues[workerNo] = nil
-
-			}(i, bus)
+	id := uuid.New().String()
+	resultCh := make(chan *CommandResult, 1)
+	msg := commandMessageAcquire(id, name, command, true, resultCh)
+	if s.running.IsOff() {
+		commandMessageRelease(msg)
+		result = &CommandResult{
+			id:  id,
+			v:   nil,
+			err: errors.New("command bus send command failed, it is not running"),
 		}
+		return
+	}
 
-		bus.runWg.Done()
-		for {
-			msg, ok := <-bus.commandMasterQueue
+	s.ch <- msg
+
+	result, _ = <-resultCh
+	if result == nil {
+		result = &CommandResult{
+			id:  id,
+			v:   nil,
+			err: errors.New("command bus send command failed, recv empty result"),
+		}
+	}
+
+	return
+}
+
+func (s *simpleCommandBus) listen(ctx context.Context) {
+	stopping := false
+	stop := false
+	for {
+		select {
+		case <-ctx.Done():
+			stopping = true
+		case msg, ok := <-s.ch:
 			if !ok {
+				stop = true
 				break
 			}
-			bus.sendToWorker(msg)
+			var result *CommandResult
+			if stopping {
+				result = &CommandResult{
+					id:          msg.id,
+					v:           nil,
+					err:         CommandBusInterruptedError,
+					interrupted: true,
+				}
+				if msg.async {
+					msg.result <- result
+				}
+				s.resultsCache.put(msg.id, result, s.resultsCacheItemTTL)
+				commandMessageRelease(msg)
+				continue
+			}
+			handle, has := s.getHandle(msg.name)
+			if !has {
+				result = &CommandResult{
+					id:          msg.id,
+					v:           nil,
+					err:         CommandBusNoHandleError,
+					interrupted: false,
+				}
+				if msg.async {
+					msg.result <- result
+				}
+				s.resultsCache.put(msg.id, result, s.resultsCacheItemTTL)
+				commandMessageRelease(msg)
+				continue
+			}
+			resultV, handleErr := handle(newContext(ctx, msg.id), msg.command)
+			result = &CommandResult{
+				id:          msg.id,
+				v:           resultV,
+				err:         handleErr,
+				interrupted: false,
+			}
+			if msg.async {
+				msg.result <- result
+			}
+			s.resultsCache.put(msg.id, result, s.resultsCacheItemTTL)
+			commandMessageRelease(msg)
 		}
-		bus.commandMasterQueue = nil
-		for _, worker := range bus.commandWorkerQueues {
-			close(worker)
+		if stop {
+			break
 		}
-	}(bus)
-	bus.runWg.Wait()
-	return
-}
-
-func (bus *simpleCommandBus) createQueue() {
-	bus.commandMasterQueue = make(chan *simpleCommandMessage, bus.buffer)
-	for i := int64(0); i < bus.workers; i++ {
-		worker := make(chan *simpleCommandMessage, bus.buffer)
-		bus.commandWorkerQueues[i] = worker
 	}
 }
 
-func (bus *simpleCommandBus) ShutdownAndWait(ctx context.Context) {
-	if !bus.isRunning() {
-		panic(fmt.Errorf("shutdown the command bus failed, %w", CommandBusIsNotRunningErr))
+func (s *simpleCommandBus) Start(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.TODO()
 	}
-	bus.setUnRunning()
-	close(bus.commandMasterQueue)
-	bus.runWg.Wait()
-	return
+	ctx, s.cancelFn = context.WithCancel(ctx)
+	s.resultsCache.loopClean(ctx)
+	for i := 0; i < s.workers; i++ {
+		go func(ctx context.Context, s *simpleCommandBus) {
+			s.listen(ctx)
+		}(ctx, s)
+	}
+}
+
+func (s *simpleCommandBus) ShutdownAndWait(ctx context.Context) {
+	panic("implement me")
 }

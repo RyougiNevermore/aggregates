@@ -1,12 +1,12 @@
 package aggregates
 
 import (
-	"github.com/nats-io/nuid"
 	"time"
 )
 
 type DomainEvent interface {
-	AggregateIdentifier() string
+	AggregateIdentifier() (id string)
+	EventName() (name string)
 }
 
 type DomainEventRaw interface {
@@ -16,15 +16,9 @@ type DomainEventRaw interface {
 
 type Aggregate interface {
 	Identifier() (id string)
-	OnEvent(name string, event DomainEventRaw)
+	OnEvent(name string, event DomainEvent)
 }
 
-var aid = nuid.New()
-
-func NewAggregateId() (id string) {
-	id = aid.Next()
-	return
-}
 
 type aggregateEvent struct {
 	name    string
